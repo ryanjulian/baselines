@@ -91,6 +91,13 @@ def categorical_sample_logits(X):
     U = tf.random_uniform(tf.shape(X))
     return argmax(X - tf.log(-tf.log(U)), axis=1)
 
+def logsigmoid(x):
+    '''Equivalent to tf.log(tf.sigmoid(x))'''
+    return -tf.nn.softplus(-x)
+
+def logit_bernoulli_entropy(logits):
+    ent = (1.-tf.nn.sigmoid(logits))*logits - logsigmoid(logits)
+    return ent
 
 # ================================================================
 # Inputs
@@ -262,21 +269,33 @@ def set_value(v, val):
         VALUE_SETTERS[v] = (set_op, set_endpoint)
     get_session().run(set_op, feed_dict={set_endpoint: val})
 
+# ================================================================
+# Save tensorflow summary
+# ================================================================
+
+
+def FileWriter(dir_path):
+    os.makedirs(dir_path, exist_ok=True)
+    return tf.summary.FileWriter(dir_path, get_session().graph)
 
 # ================================================================
 # Saving variables
 # ================================================================
 
 
-def load_state(fname):
-    saver = tf.train.Saver()
+def load_state(fname, var_list=None):
+    if var_list is not None: saver = tf.train.Saver(var_list=var_list)
+    else: saver = tf.train.Saver()
     saver.restore(get_session(), fname)
 
 
-def save_state(fname):
+def save_state(fname, var_list=None, counter=None):
     os.makedirs(os.path.dirname(fname), exist_ok=True)
-    saver = tf.train.Saver()
-    saver.save(get_session(), fname)
+    if var_list is not None: saver = tf.train.Saver(var_list=var_list)
+    else: saver = tf.train.Saver()
+    
+    if counter is not None: saver.save(get_session(), fname, global_step=counter)
+    else: saver.save(get_session(), fname)
 
 # ================================================================
 # Model components
