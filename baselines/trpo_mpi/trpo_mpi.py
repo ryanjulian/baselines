@@ -1,15 +1,20 @@
-from baselines.common import explained_variance, zipsame, dataset
-from baselines import logger
-import baselines.common.tf_util as U
-import tensorflow as tf, numpy as np
-import time, os
-from baselines.common import colorize
+import time
+import os
+import pickle as pkl
 from mpi4py import MPI
 from collections import deque
-from baselines.common.mpi_adam import MpiAdam
-from baselines.common.cg import cg
 from contextlib import contextmanager
 from tqdm import tqdm
+
+import tensorflow as tf
+import numpy as np
+
+import baselines.common.tf_util as U
+from baselines.common import explained_variance, zipsame, dataset
+from baselines import logger
+from baselines.common import colorize
+from baselines.common.mpi_adam import MpiAdam
+from baselines.common.cg import cg
 
 def traj_segment_generator(pi, env, horizon, stochastic):
     # Initialize state variables
@@ -84,7 +89,6 @@ def learn(env, policy_func, *,
         timesteps_per_batch, # what to train on
         max_kl, cg_iters,
         gamma, lam, # advantage estimation
-        save_freq=1000,
         entcoeff=0.0,
         cg_damping=1e-2,
         vf_stepsize=3e-4,
@@ -92,6 +96,7 @@ def learn(env, policy_func, *,
         max_timesteps=0, max_episodes=0, max_iters=0,  # time constraint
         callback=None
         ):
+
     nworkers = MPI.COMM_WORLD.Get_size()
     rank = MPI.COMM_WORLD.Get_rank()
     np.set_printoptions(precision=3)    
@@ -196,9 +201,6 @@ def learn(env, policy_func, *,
         elif max_iters and iters_so_far >= max_iters:
             break
 
-        # save checkpoint
-        if iters_so_far % save_freq == 0:
-            U.save_state(os.path.join("checkpoint", "trpo_agent"))
 
         logger.log("********** Iteration %i ************"%iters_so_far)
 
@@ -294,8 +296,11 @@ def learn(env, policy_func, *,
         if rank==0:
             logger.dump_tabular()
 
+    U.save_state(os.path.join("checkpoint", "trpo_agent"))
+
 # Sample one trajectory (until trajectory end)
-def traj_episode_generator(pi, env, horizon, stochastic):
+def traj_1_generator(pi, env, horizon, stochastic):
+
     t = 0
     ac = env.action_space.sample() # not used, just so we have the datatype
     new = True # marks if we're on first timestep of an episode
@@ -319,30 +324,25 @@ def traj_episode_generator(pi, env, horizon, stochastic):
 
         cur_ep_ret += rew
         cur_ep_len += 1
-        if t > 0 and (new or t % horizon == 0):
-            # convert list into numpy array
-            obs = np.array(obs)
-            rews = np.array(rews)
-            news = np.array(news)
-            acs = np.array(acs)
-            yield {"ob":obs, "rew":rews, "new":news, "ac":acs,
-                    "ep_ret":cur_ep_ret, "ep_len":cur_ep_len}
-            ob = env.reset()
-            cur_ep_ret = 0; cur_ep_len = 0; t = 0
-
-            # Initialize history arrays
-            obs = []; rews = []; news = []; acs = []
+        if new or t >= horizon:
+            break
         t += 1
 
+    obs = np.array(obs)
+    rews = np.array(rews)
+    news = np.array(news)
+    acs = np.array(acs)
+    traj = {"ob":obs, "rew":rews, "new":news, "ac":acs,
+                "ep_ret":cur_ep_ret, "ep_len":cur_ep_len}
+    return traj
+
 def sample(env, policy_func, *,
-        timesteps_per_batch, # what to train on
+        timesteps_per_batch, # serve as horizon
         load_model_path=None,
         stochastic_policy=False,
         max_episodes=1500
         ):
     
-    nworkers = MPI.COMM_WORLD.Get_size()
-    rank = MPI.COMM_WORLD.Get_rank()
     np.set_printoptions(precision=3)
     # Setup losses and stuff
     # ----------------------------------------
@@ -352,14 +352,13 @@ def sample(env, policy_func, *,
 
     ob = U.get_placeholder_cached(name="ob")
     ac = pi.pdtype.sample_placeholder([None])
-    ep_gen = traj_episode_generator(pi, env, timesteps_per_batch, stochastic=stochastic_policy)
     U.initialize()
     assert load_model_path is not None
     U.load_state(load_model_path)
 
     sample_trajs = []
     for _ in tqdm(range(max_episodes)):
-        traj = ep_gen.__next__()
+        traj = traj_1_generator(pi, env, timesteps_per_batch, stochastic=stochastic_policy)
         ob, ep_ret, ac = traj['ob'], traj['ep_ret'], traj['ac'],
         traj_data = {"ob":ob, "ac":ac, "ep_ret":ep_ret}
         sample_trajs.append(traj_data)
