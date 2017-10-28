@@ -5,8 +5,6 @@ import sys
 import argparse
 import logging
 
-import sys
-sys.path.append("/home/andrewliao11/baselines_temp")
 import gym
 import mujoco_py # Mujoco must come before other imports. https://openai.slack.com/archives/C1H6P3R7B/p1492828680631850
 from mpi4py import MPI

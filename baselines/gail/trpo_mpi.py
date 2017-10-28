@@ -12,7 +12,8 @@ from contextlib import contextmanager
 from statistics import stats
 import ipdb
 
-def traj_segment_generator(pi, env, discriminator, horizon, stochastic):
+def traj_segment_generator(pi, env, reward_giver, horizon, stochastic):
+
     # Initialize state variables
     t = 0
     ac = env.action_space.sample()
@@ -60,7 +61,7 @@ def traj_segment_generator(pi, env, discriminator, horizon, stochastic):
         acs[i] = ac
         prevacs[i] = prevac
 
-        rew = discriminator.get_reward(ob, ac)
+        rew = reward_giver.get_reward(ob, ac)
         ob, true_rew, new, _ = env.step(ac)
         rews[i] = rew
         true_rews[i] = true_rew
@@ -91,21 +92,18 @@ def add_vtarg_and_adv(seg, gamma, lam):
         gaelam[t] = lastgaelam = delta + gamma * lam * nonterminal * lastgaelam
     seg["tdlamret"] = seg["adv"] + seg["vpred"]
 
-def learn(env, policy_func, discriminator, expert_dataset,
+
+def learn(env, policy_func, reward_giver, expert_dataset,
         pretrained, pretrained_weight, *,
-        g_step, d_step,
-        timesteps_per_batch, # what to train on
-        max_kl, cg_iters,
-        gamma, lam, # advantage estimation
-        entcoeff=0.0,
-        cg_damping=1e-2,
-        vf_stepsize=3e-4, d_stepsize=3e-4,
-        vf_iters =3,
+        g_step, d_step, entcoeff, save_per_iter, 
+        ckpt_dir, log_dir, timesteps_per_batch, task_name, 
+        gamma, lam, # advantage estimation        
+        max_kl, cg_iters, cg_damping=1e-2,
+        vf_stepsize=3e-4, d_stepsize=3e-4, vf_iters =3,
         max_timesteps=0, max_episodes=0, max_iters=0,  # time constraint
-        callback=None,
-        save_per_iter=100, ckpt_dir=None, log_dir=None, 
-        load_model_path=None, task_name=None
+        callback=None
         ):
+
     nworkers = MPI.COMM_WORLD.Get_size()
     rank = MPI.COMM_WORLD.Get_rank()
     np.set_printoptions(precision=3)    
@@ -141,7 +139,7 @@ def learn(env, policy_func, discriminator, expert_dataset,
     all_var_list = pi.get_trainable_variables()
     var_list = [v for v in all_var_list if v.name.split("/")[1].startswith("pol")]
     vf_var_list = [v for v in all_var_list if v.name.split("/")[1].startswith("vf")]
-    d_adam = MpiAdam(discriminator.get_trainable_variables())
+    d_adam = MpiAdam(reward_giver.get_trainable_variables())
     vfadam = MpiAdam(vf_var_list)
 
     get_flat = U.GetFlat(var_list)
@@ -193,7 +191,7 @@ def learn(env, policy_func, discriminator, expert_dataset,
 
     # Prepare for rollouts
     # ----------------------------------------
-    seg_gen = traj_segment_generator(pi, env, discriminator, timesteps_per_batch, stochastic=True)
+    seg_gen = traj_segment_generator(pi, env, reward_giver, timesteps_per_batch, stochastic=True)
 
     episodes_so_far = 0
     timesteps_so_far = 0
@@ -206,14 +204,11 @@ def learn(env, policy_func, discriminator, expert_dataset,
     assert sum([max_iters>0, max_timesteps>0, max_episodes>0])==1
 
     g_loss_stats = stats(loss_names)
-    d_loss_stats = stats(discriminator.loss_name)
+    d_loss_stats = stats(reward_giver.loss_name)
     ep_stats = stats(["True_rewards", "Rewards", "Episode_length"])
     # if provide pretrained weight
     if pretrained_weight is not None:
         U.load_state(pretrained_weight, var_list=pi.get_variables())
-    # if provieded model path
-    if load_model_path is not None:
-        U.load_state(load_model_path)
 
     while True:        
         if callback: callback(locals(), globals())
@@ -226,7 +221,7 @@ def learn(env, policy_func, discriminator, expert_dataset,
 
         # Save model
         if iters_so_far % save_per_iter == 0 and ckpt_dir is not None:
-            U.save_state(os.path.join(ckpt_dir, task_name), counter=iters_so_far)
+            U.save_state(os.path.join(ckpt_dir, task_name))
 
         logger.log("********** Iteration %i ************"%iters_so_far)
 
@@ -303,16 +298,16 @@ def learn(env, policy_func, discriminator, expert_dataset,
         logger.record_tabular("ev_tdlam_before", explained_variance(vpredbefore, tdlamret))
         # ------------------ Update D ------------------
         logger.log("Optimizing Discriminator...")
-        logger.log(fmt_row(13, discriminator.loss_name))
+        logger.log(fmt_row(13, reward_giver.loss_name))
         ob_expert, ac_expert = expert_dataset.get_next_batch(len(ob))
         batch_size = len(ob) // d_step
         d_losses = [] # list of tuples, each of which gives the loss for a minibatch
         for ob_batch, ac_batch in dataset.iterbatches((ob, ac), 
                include_final_partial_batch=False, batch_size=batch_size):
             ob_expert, ac_expert = expert_dataset.get_next_batch(len(ob_batch))
-            # update running mean/std for discriminator
-            if hasattr(discriminator, "obs_rms"): discriminator.obs_rms.update(np.concatenate((ob_batch, ob_expert), 0))
-            *newlosses, g = discriminator.lossandgrad(ob_batch, ac_batch, ob_expert, ac_expert)
+            # update running mean/std for reward_giver
+            if hasattr(reward_giver, "obs_rms"): reward_giver.obs_rms.update(np.concatenate((ob_batch, ob_expert), 0))
+            *newlosses, g = reward_giver.lossandgrad(ob_batch, ac_batch, ob_expert, ac_expert)
             d_adam.update(allmean(g), d_stepsize)
             d_losses.append(newlosses)
         logger.log(fmt_row(13, np.mean(d_losses, axis=0)))
@@ -345,7 +340,8 @@ def learn(env, policy_func, discriminator, expert_dataset,
                            np.mean(lenbuffer)], iters_so_far)
 
 # Sample one trajectory (until trajectory end)
-def traj_episode_generator(pi, env, horizon, stochastic):
+def traj_1_generator(pi, env, horizon, stochastic):
+
     t = 0
     ac = env.action_space.sample() # not used, just so we have the datatype
     new = True # marks if we're on first timestep of an episode
@@ -369,25 +365,21 @@ def traj_episode_generator(pi, env, horizon, stochastic):
 
         cur_ep_ret += rew
         cur_ep_len += 1
-        if t > 0 and (new or t % horizon == 0):
-            # convert list into numpy array
-            obs = np.array(obs)
-            rews = np.array(rews)
-            news = np.array(news)
-            acs = np.array(acs)
-            yield {"ob":obs, "rew":rews, "new":news, "ac":acs,
-                    "ep_ret":cur_ep_ret, "ep_len":cur_ep_len}
-            ob = env.reset()
-            cur_ep_ret = 0; cur_ep_len = 0; t = 0
-
-            # Initialize history arrays
-            obs = []; rews = []; news = []; acs = []
+        if new or t >= horizon:
+            break
         t += 1
+
+    obs = np.array(obs)
+    rews = np.array(rews)
+    news = np.array(news)
+    acs = np.array(acs)
+    traj = {"ob":obs, "rew":rews, "new":news, "ac":acs,
+                "ep_ret":cur_ep_ret, "ep_len":cur_ep_len}
+    return traj
 
 def evaluate(env, policy_func, load_model_path, timesteps_per_batch, number_trajs=10, 
          stochastic_policy=False):
     
-    from tqdm import tqdm
     # Setup network
     # ----------------------------------------
     ob_space = env.observation_space
@@ -396,13 +388,12 @@ def evaluate(env, policy_func, load_model_path, timesteps_per_batch, number_traj
     U.initialize()
     # Prepare for rollouts
     # ----------------------------------------
-    ep_gen = traj_episode_generator(pi, env, timesteps_per_batch, stochastic=stochastic_policy)
     U.load_state(load_model_path)
 
     len_list = []
     ret_list = []
     for _ in tqdm(range(number_trajs)):
-        traj = ep_gen.__next__()
+        traj = traj_1_generator(pi, env, timesteps_per_batch, stochastic=stochastic_policy)
         ep_len, ep_ret = traj['ep_len'], traj['ep_ret']
         len_list.append(ep_len)
         ret_list.append(ep_ret)
