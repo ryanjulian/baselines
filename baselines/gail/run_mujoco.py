@@ -52,7 +52,7 @@ def main(args):
             task_name
             )
     elif args.task == 'evaluate':
-        evaluate(env, polic_fn, args.load_model_path, args.stochastic_policy)
+        evaluate(env, policy_fn, args.load_model_path, args.stochastic_policy)
     else: 
         raise NotImplementedError
     env.close()
@@ -95,7 +95,7 @@ def train(env, seed, policy_fn, reward_giver, dataset, algo,
     else:
         raise NotImplementedError
 
-def evaluate(env, polic_fn, load_model_path, stochastic_policy):
+def evaluate(env, policy_fn, load_model_path, stochastic_policy):
 
     import trpo_mpi
     trpo_mpi.evaluate(env, policy_fn, load_model_path, timesteps_per_batch=1024,

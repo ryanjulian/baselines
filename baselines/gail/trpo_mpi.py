@@ -1,16 +1,21 @@
-from baselines.common import explained_variance, zipsame, dataset, Dataset, fmt_row
-from baselines import logger
-import baselines.common.tf_util as U
-import tensorflow as tf, numpy as np
-import time, os
-from baselines.common import colorize
+import time
+import os
+import ipdb
+from contextlib import contextmanager
 from mpi4py import MPI
 from collections import deque
+from tqdm import tqdm
+
+import tensorflow as tf
+import numpy as np
+
+import baselines.common.tf_util as U
+from baselines.common import explained_variance, zipsame, dataset, Dataset, fmt_row
+from baselines import logger
+from baselines.common import colorize
 from baselines.common.mpi_adam import MpiAdam
 from baselines.common.cg import cg
-from contextlib import contextmanager
 from statistics import stats
-import ipdb
 
 def traj_segment_generator(pi, env, reward_giver, horizon, stochastic):
 
