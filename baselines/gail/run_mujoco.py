@@ -1,11 +1,8 @@
 import argparse
 import os.path as osp
 import logging
-import ipdb
 from mpi4py import MPI
 
-import sys
-sys.path.append("/home/andrewliao11/baselines_temp")
 import numpy as np
 import gym
 

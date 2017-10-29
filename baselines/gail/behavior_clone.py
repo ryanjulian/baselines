@@ -1,6 +1,5 @@
 import tempfile
 import os
-import ipdb
 from tqdm import tqdm
 
 import tensorflow as tf
