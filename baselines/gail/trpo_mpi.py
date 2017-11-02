@@ -4,7 +4,6 @@ import ipdb
 from contextlib import contextmanager
 from mpi4py import MPI
 from collections import deque
-from tqdm import tqdm
 
 import tensorflow as tf
 import numpy as np
@@ -343,71 +342,6 @@ def learn(env, policy_func, reward_giver, expert_dataset,
             d_loss_stats.add_all_summary(writer, np.mean(d_losses, axis=0), iters_so_far)
             ep_stats.add_all_summary(writer, [np.mean(true_rewbuffer), np.mean(rewbuffer),
                            np.mean(lenbuffer)], iters_so_far)
-
-# Sample one trajectory (until trajectory end)
-def traj_1_generator(pi, env, horizon, stochastic):
-
-    t = 0
-    ac = env.action_space.sample() # not used, just so we have the datatype
-    new = True # marks if we're on first timestep of an episode
-
-    ob = env.reset()
-    cur_ep_ret = 0 # return in current episode
-    cur_ep_len = 0 # len of current episode
-
-    # Initialize history arrays
-    obs = []; rews = []; news = []; acs = []
-
-    while True:
-        prevac = ac
-        ac, vpred = pi.act(stochastic, ob)
-        obs.append(ob)
-        news.append(new)
-        acs.append(ac)
-
-        ob, rew, new, _ = env.step(ac)
-        rews.append(rew)
-
-        cur_ep_ret += rew
-        cur_ep_len += 1
-        if new or t >= horizon:
-            break
-        t += 1
-
-    obs = np.array(obs)
-    rews = np.array(rews)
-    news = np.array(news)
-    acs = np.array(acs)
-    traj = {"ob":obs, "rew":rews, "new":news, "ac":acs,
-                "ep_ret":cur_ep_ret, "ep_len":cur_ep_len}
-    return traj
-
-def evaluate(env, policy_func, load_model_path, timesteps_per_batch, number_trajs=10, 
-         stochastic_policy=False):
-    
-    # Setup network
-    # ----------------------------------------
-    ob_space = env.observation_space
-    ac_space = env.action_space
-    pi = policy_func("pi", ob_space, ac_space, reuse=False)
-    U.initialize()
-    # Prepare for rollouts
-    # ----------------------------------------
-    U.load_state(load_model_path)
-
-    len_list = []
-    ret_list = []
-    for _ in tqdm(range(number_trajs)):
-        traj = traj_1_generator(pi, env, timesteps_per_batch, stochastic=stochastic_policy)
-        ep_len, ep_ret = traj['ep_len'], traj['ep_ret']
-        len_list.append(ep_len)
-        ret_list.append(ep_ret)
-    if stochastic_policy: 
-        print ('stochastic policy:')
-    else:
-        print ('deterministic policy:' )
-    print ("Average length:", sum(len_list)/len(len_list))
-    print ("Average return:", sum(ret_list)/len(ret_list))
 
 def flatten_lists(listoflists):
     return [el for list_ in listoflists for el in list_]
