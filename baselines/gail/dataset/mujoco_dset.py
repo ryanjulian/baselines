@@ -52,7 +52,9 @@ class Mujoco_Dset(object):
             acs.append(traj["ac"])
         self.num_traj = len(rets)
         self.avg_ret = sum(rets)/len(rets)
+        self.std_ret = np.std(np.array(rets))
         self.avg_len = sum(lens)/len(lens)
+        self.std_len = np.std(np.array(lens))
         self.rets = np.array(rets)
         self.lens = np.array(lens)
         self.obs = np.array([v for ob in obs for v in ob])
@@ -75,6 +77,8 @@ class Mujoco_Dset(object):
         logger.log("Total transitions: %d"%self.num_transition)
         logger.log("Average episode length: %f"%self.avg_len)
         logger.log("Average returns: %f"%self.avg_ret)
+        logger.log("Std for returns: %f"%self.std_ret)
+        logger.log("Std for episode length: %f"%self.std_len)
 
     def get_next_batch(self, batch_size, split=None):
         if split is None:
@@ -93,13 +97,15 @@ class Mujoco_Dset(object):
         plt.close()
 
 
-def test(expert_path):
+def test(expert_path, plot):
     dset = Mujoco_Dset(expert_path)
-    dset.plot()
+    if plot:
+        dset.plot()
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--expert_path", type=str, default="../baselines/ppo1/ppo.Hopper.0.00.pkl")
+    parser.add_argument("--plot", type=bool, default=False)
     args = parser.parse_args()
-    test(args.expert_path)
+    test(args.expert_path, args.plot)
