@@ -7,11 +7,12 @@ import os.path as osp
 import gym
 import logging
 from baselines import logger
-from baselines.ppo1.mlp_policy import MlpPolicy
 from baselines.common.mpi_fork import mpi_fork
 from baselines import bench
 from baselines.trpo_mpi import trpo_mpi
+from baselines.trpo_mpi.policy import policy_network
 import sys
+
 
 def train(env_id, num_timesteps, seed):
     import baselines.common.tf_util as U
@@ -24,9 +25,12 @@ def train(env_id, num_timesteps, seed):
     workerseed = seed + 10000 * MPI.COMM_WORLD.Get_rank()
     set_global_seeds(workerseed)
     env = gym.make(env_id)
-    def policy_fn(name, ob_space, ac_space):
-        return MlpPolicy(name=name, ob_space=env.observation_space, ac_space=env.action_space,
-            hid_size=32, num_hid_layers=2)
+    policy_fn = policy_network('mlp')
+    
+    #from baselines.ppo1.mlp_policy import MlpPolicy
+    #def policy_fn(name, ob_space, ac_space):
+    #    return MlpPolicy(name=name, ob_space=env.observation_space, ac_space=env.action_space,
+    #        hid_size=32, num_hid_layers=2)
     env = bench.Monitor(env, logger.get_dir() and
         osp.join(logger.get_dir(), str(rank)))
     env.seed(workerseed)
