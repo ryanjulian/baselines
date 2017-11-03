@@ -6,9 +6,9 @@ import gym, logging
 from baselines import logger
 from baselines import bench
 from baselines.common.atari_wrappers import make_atari, wrap_deepmind
+from baselines.trpo_mpi.policy import policy_network
 
 def train(env_id, num_timesteps, seed):
-    from baselines.trpo_mpi.nosharing_cnn_policy import CnnPolicy
     from baselines.trpo_mpi import trpo_mpi
     import baselines.common.tf_util as U
     rank = MPI.COMM_WORLD.Get_rank()
@@ -22,8 +22,7 @@ def train(env_id, num_timesteps, seed):
     workerseed = seed + 10000 * MPI.COMM_WORLD.Get_rank()
     set_global_seeds(workerseed)
     env = make_atari(env_id)
-    def policy_fn(name, ob_space, ac_space): #pylint: disable=W0613
-        return CnnPolicy(name=name, ob_space=env.observation_space, ac_space=env.action_space)
+    policy_fn = policy_network('noshare_cnn')
     env = bench.Monitor(env, logger.get_dir() and osp.join(logger.get_dir(), str(rank)))
     env.seed(workerseed)
     gym.logger.setLevel(logging.WARN)

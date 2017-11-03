@@ -11,7 +11,6 @@ from baselines.common.mpi_fork import mpi_fork
 from baselines import bench
 from baselines.trpo_mpi import trpo_mpi
 from baselines.trpo_mpi.policy import policy_network
-import sys
 
 
 def train(env_id, num_timesteps, seed):
@@ -26,11 +25,6 @@ def train(env_id, num_timesteps, seed):
     set_global_seeds(workerseed)
     env = gym.make(env_id)
     policy_fn = policy_network('mlp')
-    
-    #from baselines.ppo1.mlp_policy import MlpPolicy
-    #def policy_fn(name, ob_space, ac_space):
-    #    return MlpPolicy(name=name, ob_space=env.observation_space, ac_space=env.action_space,
-    #        hid_size=32, num_hid_layers=2)
     env = bench.Monitor(env, logger.get_dir() and
         osp.join(logger.get_dir(), str(rank)))
     env.seed(workerseed)
