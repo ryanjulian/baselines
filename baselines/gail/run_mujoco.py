@@ -40,7 +40,10 @@ def main(args):
     args.checkpoint_dir = osp.join(args.checkpoint_dir, task_name)
     args.log_dir = osp.join(args.log_dir, task_name)
 
-    if args.task == 'train':
+    if args.task == 'sample':
+        runner(env, policy_fn, args.load_model_path, timesteps_per_batch=1024,
+            number_trajs=10, stochastic_policy=args.stochastic_policy, save=True)
+    elif args.task == 'train':
         dataset = Mujoco_Dset(expert_path=args.expert_path, ret_threshold=args.ret_threshold, 
             traj_limitation=args.traj_limitation)
         reward_giver = TransitionClassifier(env, args.adversary_hidden_size, entcoeff=args.adversary_entcoeff)
@@ -50,11 +53,12 @@ def main(args):
             task_name
             )
     elif args.task == 'evaluate':
-        evaluate(env, policy_fn, args.load_model_path, timesteps_per_batch=1024,
-            number_trajs=10, stochastic_policy=args.stochastic_policy)
+        runner(env, policy_fn, args.load_model_path, timesteps_per_batch=1024,
+            number_trajs=10, stochastic_policy=args.stochastic_policy, save=False)
     else: 
         raise NotImplementedError
     env.close()
+
 
 def train(env, seed, policy_fn, reward_giver, dataset, algo, 
         g_step, d_step, policy_entcoeff,
@@ -94,8 +98,8 @@ def train(env, seed, policy_fn, reward_giver, dataset, algo,
     else:
         raise NotImplementedError
 
-def evaluate(env, policy_func, load_model_path, timesteps_per_batch, number_trajs,
-         stochastic_policy):
+def runner(env, policy_func, load_model_path, timesteps_per_batch, number_trajs,
+         stochastic_policy, save=False):
 
     # Setup network
     # ----------------------------------------
@@ -107,17 +111,25 @@ def evaluate(env, policy_func, load_model_path, timesteps_per_batch, number_traj
     # ----------------------------------------
     U.load_state(load_model_path)
 
+    obs_list = []
+    acs_list = []
     len_list = []
     ret_list = []
     for _ in tqdm(range(number_trajs)):
         traj = traj_1_generator(pi, env, timesteps_per_batch, stochastic=stochastic_policy)
-        ep_len, ep_ret = traj['ep_len'], traj['ep_ret']
+        obs, acs, ep_len, ep_ret = traj['ob'], traj['ac'], traj['ep_len'], traj['ep_ret']
+        obs_list.append(obs)
+        acs_list.append(acs)
         len_list.append(ep_len)
         ret_list.append(ep_ret)
     if stochastic_policy:
         print ('stochastic policy:')
     else:
         print ('deterministic policy:' )
+    if save:
+        filename = load_model_path.split('/')[-1] + '.' + env.spec.id
+        np.savez(filename, obs=np.array(obs_list), acs=np.array(acs_list),
+                lens=np.array(len_list), rets=np.array(ret_list))
     print ("Average length:", sum(len_list)/len(len_list))
     print ("Average return:", sum(ret_list)/len(ret_list))
 
@@ -170,7 +182,7 @@ def argsparser():
     parser.add_argument('--log_dir', help='the directory to save log file', default='log')
     parser.add_argument('--load_model_path', help='if provided, load the model', type=str, default=None)
     # Task
-    parser.add_argument('--task', type=str, choices=['train', 'evaluate'], default='train')
+    parser.add_argument('--task', type=str, choices=['train', 'evaluate', 'sample'], default='train')
     # for evaluatation
     parser.add_argument('--stochastic_policy', type=bool, default=False)
     #  Mujoco Dataset Configuration

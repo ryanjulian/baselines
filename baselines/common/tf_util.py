@@ -274,7 +274,7 @@ def set_value(v, val):
 # ================================================================
 
 
-def FileWriter(dir_path):
+def file_writer(dir_path):
     os.makedirs(dir_path, exist_ok=True)
     return tf.summary.FileWriter(dir_path, get_session().graph)
 
@@ -284,15 +284,19 @@ def FileWriter(dir_path):
 
 
 def load_state(fname, var_list=None):
-    if var_list is not None: saver = tf.train.Saver(var_list=var_list)
-    else: saver = tf.train.Saver()
+    if var_list is not None: 
+        saver = tf.train.Saver(var_list=var_list)
+    else: 
+        saver = tf.train.Saver()
     saver.restore(get_session(), fname)
 
 
 def save_state(fname, var_list=None):
     os.makedirs(os.path.dirname(fname), exist_ok=True)
-    if var_list is not None: saver = tf.train.Saver(var_list=var_list)
-    else: saver = tf.train.Saver()
+    if var_list is not None: 
+        saver = tf.train.Saver(var_list=var_list)
+    else: 
+        saver = tf.train.Saver()
     saver.save(get_session(), fname)
 
 # ================================================================

@@ -184,7 +184,7 @@ def learn(env, policy_func, reward_giver, expert_dataset,
         out /= nworkers
         return out
 
-    writer = U.FileWriter(log_dir)
+    writer = U.file_writer(log_dir)
     U.initialize()
     th_init = get_flat()
     MPI.COMM_WORLD.Bcast(th_init, root=0)
