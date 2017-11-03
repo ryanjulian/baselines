@@ -1,36 +1,41 @@
 import time
 import os
-import pickle as pkl
+import ipdb
+from contextlib import contextmanager
 from mpi4py import MPI
 from collections import deque
-from contextlib import contextmanager
-from tqdm import tqdm
 
 import tensorflow as tf
 import numpy as np
 
 import baselines.common.tf_util as U
-from baselines.common import explained_variance, zipsame, dataset
+from baselines.common import explained_variance, zipsame, dataset, Dataset, fmt_row
 from baselines import logger
 from baselines.common import colorize
 from baselines.common.mpi_adam import MpiAdam
 from baselines.common.cg import cg
+from statistics import stats
 
-def traj_segment_generator(pi, env, horizon, stochastic):
+def traj_segment_generator(pi, env, reward_giver, horizon, stochastic):
+
     # Initialize state variables
     t = 0
     ac = env.action_space.sample()
     new = True
     rew = 0.0
+    true_rew = 0.0
     ob = env.reset()
 
     cur_ep_ret = 0
     cur_ep_len = 0
+    cur_ep_true_ret = 0
+    ep_true_rets = []
     ep_rets = []
     ep_lens = []
 
     # Initialize history arrays
     obs = np.array([ob for _ in range(horizon)])
+    true_rews = np.zeros(horizon, 'float32')
     rews = np.zeros(horizon, 'float32')
     vpreds = np.zeros(horizon, 'float32')
     news = np.zeros(horizon, 'int32')
@@ -46,11 +51,12 @@ def traj_segment_generator(pi, env, horizon, stochastic):
         if t > 0 and t % horizon == 0:
             yield {"ob" : obs, "rew" : rews, "vpred" : vpreds, "new" : news,
                     "ac" : acs, "prevac" : prevacs, "nextvpred": vpred * (1 - new),
-                    "ep_rets" : ep_rets, "ep_lens" : ep_lens}
+                    "ep_rets" : ep_rets, "ep_lens" : ep_lens, "ep_true_rets": ep_true_rets}
             _, vpred = pi.act(stochastic, ob)            
             # Be careful!!! if you change the downstream algorithm to aggregate
             # several of these batches, then be sure to do a deepcopy
             ep_rets = []
+            ep_true_rets = []
             ep_lens = []
         i = t % horizon
         obs[i] = ob
@@ -59,15 +65,20 @@ def traj_segment_generator(pi, env, horizon, stochastic):
         acs[i] = ac
         prevacs[i] = prevac
 
-        ob, rew, new, _ = env.step(ac)
+        rew = reward_giver.get_reward(ob, ac)
+        ob, true_rew, new, _ = env.step(ac)
         rews[i] = rew
+        true_rews[i] = true_rew
 
         cur_ep_ret += rew
+        cur_ep_true_ret += true_rew
         cur_ep_len += 1
         if new:
             ep_rets.append(cur_ep_ret)
+            ep_true_rets.append(cur_ep_true_ret)
             ep_lens.append(cur_ep_len)
             cur_ep_ret = 0
+            cur_ep_true_ret = 0
             cur_ep_len = 0
             ob = env.reset()
         t += 1
@@ -85,14 +96,14 @@ def add_vtarg_and_adv(seg, gamma, lam):
         gaelam[t] = lastgaelam = delta + gamma * lam * nonterminal * lastgaelam
     seg["tdlamret"] = seg["adv"] + seg["vpred"]
 
-def learn(env, policy_func, *,
-        timesteps_per_batch, # what to train on
-        max_kl, cg_iters,
-        gamma, lam, # advantage estimation
-        entcoeff=0.0,
-        cg_damping=1e-2,
-        vf_stepsize=3e-4,
-        vf_iters =3,
+
+def learn(env, policy_func, reward_giver, expert_dataset,
+        pretrained, pretrained_weight, *,
+        g_step, d_step, entcoeff, save_per_iter, 
+        ckpt_dir, log_dir, timesteps_per_batch, task_name, 
+        gamma, lam, # advantage estimation        
+        max_kl, cg_iters, cg_damping=1e-2,
+        vf_stepsize=3e-4, d_stepsize=3e-4, vf_iters =3,
         max_timesteps=0, max_episodes=0, max_iters=0,  # time constraint
         callback=None
         ):
@@ -104,7 +115,7 @@ def learn(env, policy_func, *,
     # ----------------------------------------
     ob_space = env.observation_space
     ac_space = env.action_space
-    pi = policy_func("pi", ob_space, ac_space)
+    pi = policy_func("pi", ob_space, ac_space, reuse=(pretrained_weight!=None))
     oldpi = policy_func("oldpi", ob_space, ac_space)
     atarg = tf.placeholder(dtype=tf.float32, shape=[None]) # Target advantage function (if applicable)
     ret = tf.placeholder(dtype=tf.float32, shape=[None]) # Empirical return
@@ -132,6 +143,7 @@ def learn(env, policy_func, *,
     all_var_list = pi.get_trainable_variables()
     var_list = [v for v in all_var_list if v.name.split("/")[1].startswith("pol")]
     vf_var_list = [v for v in all_var_list if v.name.split("/")[1].startswith("vf")]
+    d_adam = MpiAdam(reward_giver.get_trainable_variables())
     vfadam = MpiAdam(vf_var_list)
 
     get_flat = U.GetFlat(var_list)
@@ -172,16 +184,18 @@ def learn(env, policy_func, *,
         out /= nworkers
         return out
 
+    writer = U.FileWriter(log_dir)
     U.initialize()
     th_init = get_flat()
     MPI.COMM_WORLD.Bcast(th_init, root=0)
     set_from_flat(th_init)
+    d_adam.sync()
     vfadam.sync()
     print("Init param sum", th_init.sum(), flush=True)
 
     # Prepare for rollouts
     # ----------------------------------------
-    seg_gen = traj_segment_generator(pi, env, timesteps_per_batch, stochastic=True)
+    seg_gen = traj_segment_generator(pi, env, reward_giver, timesteps_per_batch, stochastic=True)
 
     episodes_so_far = 0
     timesteps_so_far = 0
@@ -189,8 +203,16 @@ def learn(env, policy_func, *,
     tstart = time.time()
     lenbuffer = deque(maxlen=40) # rolling buffer for episode lengths
     rewbuffer = deque(maxlen=40) # rolling buffer for episode rewards
+    true_rewbuffer = deque(maxlen=40)
 
     assert sum([max_iters>0, max_timesteps>0, max_episodes>0])==1
+
+    g_loss_stats = stats(loss_names)
+    d_loss_stats = stats(reward_giver.loss_name)
+    ep_stats = stats(["True_rewards", "Rewards", "Episode_length"])
+    # if provide pretrained weight
+    if pretrained_weight is not None:
+        U.load_state(pretrained_weight, var_list=pi.get_variables())
 
     while True:        
         if callback: callback(locals(), globals())
@@ -201,89 +223,110 @@ def learn(env, policy_func, *,
         elif max_iters and iters_so_far >= max_iters:
             break
 
+        # Save model
+        if iters_so_far % save_per_iter == 0 and ckpt_dir is not None:
+            U.save_state(os.path.join(ckpt_dir, task_name))
 
         logger.log("********** Iteration %i ************"%iters_so_far)
 
-        with timed("sampling"):
-            seg = seg_gen.__next__()
-        add_vtarg_and_adv(seg, gamma, lam)
-
-        # ob, ac, atarg, ret, td1ret = map(np.concatenate, (obs, acs, atargs, rets, td1rets))
-        ob, ac, atarg, tdlamret = seg["ob"], seg["ac"], seg["adv"], seg["tdlamret"]
-        vpredbefore = seg["vpred"] # predicted value function before udpate
-        atarg = (atarg - atarg.mean()) / atarg.std() # standardized advantage function estimate
-
-        if hasattr(pi, "ret_rms"): pi.ret_rms.update(tdlamret)
-        if hasattr(pi, "ob_rms"): pi.ob_rms.update(ob) # update running mean/std for policy
-
-        args = seg["ob"], seg["ac"], atarg
-        fvpargs = [arr[::5] for arr in args]
         def fisher_vector_product(p):
             return allmean(compute_fvp(p, *fvpargs)) + cg_damping * p
+        # ------------------ Update G ------------------
+        logger.log("Optimizing Policy...")
+        for _ in range(g_step):
+            with timed("sampling"):
+                seg = seg_gen.__next__()
+            add_vtarg_and_adv(seg, gamma, lam)
+            # ob, ac, atarg, ret, td1ret = map(np.concatenate, (obs, acs, atargs, rets, td1rets))
+            ob, ac, atarg, tdlamret = seg["ob"], seg["ac"], seg["adv"], seg["tdlamret"]
+            vpredbefore = seg["vpred"] # predicted value function before udpate
+            atarg = (atarg - atarg.mean()) / atarg.std() # standardized advantage function estimate
 
-        assign_old_eq_new() # set old parameter values to new parameter values
-        with timed("computegrad"):
-            *lossbefore, g = compute_lossandgrad(*args)
-        lossbefore = allmean(np.array(lossbefore))
-        g = allmean(g)
-        if np.allclose(g, 0):
-            logger.log("Got zero gradient. not updating")
-        else:
-            with timed("cg"):
-                stepdir = cg(fisher_vector_product, g, cg_iters=cg_iters, verbose=rank==0)
-            assert np.isfinite(stepdir).all()
-            shs = .5*stepdir.dot(fisher_vector_product(stepdir))
-            lm = np.sqrt(shs / max_kl)
-            # logger.log("lagrange multiplier:", lm, "gnorm:", np.linalg.norm(g))
-            fullstep = stepdir / lm
-            expectedimprove = g.dot(fullstep)
-            surrbefore = lossbefore[0]
-            stepsize = 1.0
-            thbefore = get_flat()
-            for _ in range(10):
-                thnew = thbefore + fullstep * stepsize
-                set_from_flat(thnew)
-                meanlosses = surr, kl, *_ = allmean(np.array(compute_losses(*args)))
-                improve = surr - surrbefore
-                logger.log("Expected: %.3f Actual: %.3f"%(expectedimprove, improve))
-                if not np.isfinite(meanlosses).all():
-                    logger.log("Got non-finite value of losses -- bad!")
-                elif kl > max_kl * 1.5:
-                    logger.log("violated KL constraint. shrinking step.")
-                elif improve < 0:
-                    logger.log("surrogate didn't improve. shrinking step.")
-                else:
-                    logger.log("Stepsize OK!")
-                    break
-                stepsize *= .5
+            if hasattr(pi, "ob_rms"): pi.ob_rms.update(ob) # update running mean/std for policy
+
+            args = seg["ob"], seg["ac"], atarg
+            fvpargs = [arr[::5] for arr in args]
+
+            assign_old_eq_new() # set old parameter values to new parameter values
+            with timed("computegrad"):
+                *lossbefore, g = compute_lossandgrad(*args)
+            lossbefore = allmean(np.array(lossbefore))
+            g = allmean(g)
+            if np.allclose(g, 0):
+                logger.log("Got zero gradient. not updating")
             else:
-                logger.log("couldn't compute a good step")
-                set_from_flat(thbefore)
-            if nworkers > 1 and iters_so_far % 20 == 0:
-                paramsums = MPI.COMM_WORLD.allgather((thnew.sum(), vfadam.getflat().sum())) # list of tuples
-                assert all(np.allclose(ps, paramsums[0]) for ps in paramsums[1:])
+                with timed("cg"):
+                    stepdir = cg(fisher_vector_product, g, cg_iters=cg_iters, verbose=rank==0)
+                assert np.isfinite(stepdir).all()
+                shs = .5*stepdir.dot(fisher_vector_product(stepdir))
+                lm = np.sqrt(shs / max_kl)
+                # logger.log("lagrange multiplier:", lm, "gnorm:", np.linalg.norm(g))
+                fullstep = stepdir / lm
+                expectedimprove = g.dot(fullstep)
+                surrbefore = lossbefore[0]
+                stepsize = 1.0
+                thbefore = get_flat()
+                for _ in range(10):
+                    thnew = thbefore + fullstep * stepsize
+                    set_from_flat(thnew)
+                    meanlosses = surr, kl, *_ = allmean(np.array(compute_losses(*args)))
+                    improve = surr - surrbefore
+                    logger.log("Expected: %.3f Actual: %.3f"%(expectedimprove, improve))
+                    if not np.isfinite(meanlosses).all():
+                        logger.log("Got non-finite value of losses -- bad!")
+                    elif kl > max_kl * 1.5:
+                        logger.log("violated KL constraint. shrinking step.")
+                    elif improve < 0:
+                        logger.log("surrogate didn't improve. shrinking step.")
+                    else:
+                        logger.log("Stepsize OK!")
+                        break
+                    stepsize *= .5
+                else:
+                    logger.log("couldn't compute a good step")
+                    set_from_flat(thbefore)
+                if nworkers > 1 and iters_so_far % 20 == 0:
+                    paramsums = MPI.COMM_WORLD.allgather((thnew.sum(), vfadam.getflat().sum())) # list of tuples
+                    assert all(np.allclose(ps, paramsums[0]) for ps in paramsums[1:])
+            with timed("vf"):
+                for _ in range(vf_iters):
+                    for (mbob, mbret) in dataset.iterbatches((seg["ob"], seg["tdlamret"]),
+                    include_final_partial_batch=False, batch_size=128):
+                        if hasattr(pi, "ob_rms"): pi.ob_rms.update(mbob) # update running mean/std for policy
+                        g = allmean(compute_vflossandgrad(mbob, mbret))
+                        vfadam.update(g, vf_stepsize)
 
+        g_losses = meanlosses
         for (lossname, lossval) in zip(loss_names, meanlosses):
             logger.record_tabular(lossname, lossval)
-
-        with timed("vf"):
-
-            for _ in range(vf_iters):
-                for (mbob, mbret) in dataset.iterbatches((seg["ob"], seg["tdlamret"]), 
-                include_final_partial_batch=False, batch_size=64):
-                    g = allmean(compute_vflossandgrad(mbob, mbret))
-                    vfadam.update(g, vf_stepsize)
-
         logger.record_tabular("ev_tdlam_before", explained_variance(vpredbefore, tdlamret))
+        # ------------------ Update D ------------------
+        logger.log("Optimizing Discriminator...")
+        logger.log(fmt_row(13, reward_giver.loss_name))
+        ob_expert, ac_expert = expert_dataset.get_next_batch(len(ob))
+        batch_size = len(ob) // d_step
+        d_losses = [] # list of tuples, each of which gives the loss for a minibatch
+        for ob_batch, ac_batch in dataset.iterbatches((ob, ac), 
+               include_final_partial_batch=False, batch_size=batch_size):
+            ob_expert, ac_expert = expert_dataset.get_next_batch(len(ob_batch))
+            # update running mean/std for reward_giver
+            if hasattr(reward_giver, "obs_rms"): reward_giver.obs_rms.update(np.concatenate((ob_batch, ob_expert), 0))
+            *newlosses, g = reward_giver.lossandgrad(ob_batch, ac_batch, ob_expert, ac_expert)
+            d_adam.update(allmean(g), d_stepsize)
+            d_losses.append(newlosses)
+        logger.log(fmt_row(13, np.mean(d_losses, axis=0)))
 
-        lrlocal = (seg["ep_lens"], seg["ep_rets"]) # local values
+
+        lrlocal = (seg["ep_lens"], seg["ep_rets"], seg["ep_true_rets"]) # local values
         listoflrpairs = MPI.COMM_WORLD.allgather(lrlocal) # list of tuples
-        lens, rews = map(flatten_lists, zip(*listoflrpairs))
+        lens, rews, true_rets = map(flatten_lists, zip(*listoflrpairs))
+        true_rewbuffer.extend(true_rets)
         lenbuffer.extend(lens)
         rewbuffer.extend(rews)
 
         logger.record_tabular("EpLenMean", np.mean(lenbuffer))
         logger.record_tabular("EpRewMean", np.mean(rewbuffer))
+        logger.record_tabular("EpTrueRewMean", np.mean(true_rewbuffer))
         logger.record_tabular("EpThisIter", len(lens))
         episodes_so_far += len(lens)
         timesteps_so_far += sum(lens)
@@ -295,77 +338,10 @@ def learn(env, policy_func, *,
 
         if rank==0:
             logger.dump_tabular()
+            g_loss_stats.add_all_summary(writer, g_losses, iters_so_far)
+            d_loss_stats.add_all_summary(writer, np.mean(d_losses, axis=0), iters_so_far)
+            ep_stats.add_all_summary(writer, [np.mean(true_rewbuffer), np.mean(rewbuffer),
+                           np.mean(lenbuffer)], iters_so_far)
 
-    U.save_state(os.path.join("checkpoint", "trpo_agent"))
-
-# Sample one trajectory (until trajectory end)
-def traj_1_generator(pi, env, horizon, stochastic):
-
-    t = 0
-    ac = env.action_space.sample() # not used, just so we have the datatype
-    new = True # marks if we're on first timestep of an episode
-
-    ob = env.reset()
-    cur_ep_ret = 0 # return in current episode
-    cur_ep_len = 0 # len of current episode
-
-    # Initialize history arrays
-    obs = []; rews = []; news = []; acs = []
-
-    while True:
-        prevac = ac
-        ac, vpred = pi.act(stochastic, ob)
-        obs.append(ob)
-        news.append(new)
-        acs.append(ac)
-
-        ob, rew, new, _ = env.step(ac)
-        rews.append(rew)
-
-        cur_ep_ret += rew
-        cur_ep_len += 1
-        if new or t >= horizon:
-            break
-        t += 1
-
-    obs = np.array(obs)
-    rews = np.array(rews)
-    news = np.array(news)
-    acs = np.array(acs)
-    traj = {"ob":obs, "rew":rews, "new":news, "ac":acs,
-                "ep_ret":cur_ep_ret, "ep_len":cur_ep_len}
-    return traj
-
-def sample(env, policy_func, *,
-        timesteps_per_batch, # serve as horizon
-        load_model_path=None,
-        stochastic_policy=False,
-        max_episodes=1500
-        ):
-    
-    np.set_printoptions(precision=3)
-    # Setup losses and stuff
-    # ----------------------------------------
-    ob_space = env.observation_space
-    ac_space = env.action_space
-    pi = policy_func("pi", ob_space, ac_space)
-
-    ob = U.get_placeholder_cached(name="ob")
-    ac = pi.pdtype.sample_placeholder([None])
-    U.initialize()
-    assert load_model_path is not None
-    U.load_state(load_model_path)
-
-    sample_trajs = []
-    for _ in tqdm(range(max_episodes)):
-        traj = traj_1_generator(pi, env, timesteps_per_batch, stochastic=stochastic_policy)
-        ob, ep_ret, ac = traj['ob'], traj['ep_ret'], traj['ac'],
-        traj_data = {"ob":ob, "ac":ac, "ep_ret":ep_ret}
-        sample_trajs.append(traj_data)
-
-    sample_ep_rets = [traj["ep_ret"] for traj in sample_trajs]
-    logger.log("Average total return: %f"%(sum(sample_ep_rets)/len(sample_ep_rets)))
-    pkl.dump(sample_trajs, open(env.spec.id + ".pkl", "wb"))
-    
 def flatten_lists(listoflists):
     return [el for list_ in listoflists for el in list_]
