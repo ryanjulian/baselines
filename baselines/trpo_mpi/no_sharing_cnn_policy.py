@@ -3,7 +3,7 @@ import tensorflow as tf
 import gym
 from baselines.common.distributions import make_pdtype
 
-class CnnPolicy(object):
+class NoSharingCnnPolicy(object):
     recurrent = False
     def __init__(self, name, ob_space, ac_space):
         with tf.variable_scope(name):
