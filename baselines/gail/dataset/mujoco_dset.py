@@ -1,8 +1,11 @@
-from baselines import logger
+import argparse
 import pickle as pkl
+
+import ipdb
 import numpy as np
 from tqdm import tqdm
-import ipdb
+
+from baselines import logger
 
 
 class Dset(object):
@@ -115,7 +118,6 @@ def test(expert_path, plot):
 
 
 if __name__ == '__main__':
-    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--expert_path",

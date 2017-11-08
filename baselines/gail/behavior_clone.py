@@ -1,13 +1,13 @@
-import tempfile
 import os
-from tqdm import tqdm
+import tempfile
 
 import tensorflow as tf
+from tqdm import tqdm
 
-import baselines.common.tf_util as U
 from baselines import logger
+import baselines.common.tf_util as U
 from baselines.common.mpi_adam import MpiAdam
-from statistics import stats
+from baselines.gail.statistics import stats
 
 
 def evaluate(env,

@@ -1,8 +1,8 @@
 # the code is similar to https://github.com/carpedm20/deep-rl-tensorflow/blob/master/agents/statistic.py
 # in my implementation, I use one statistics for recording immediate results and
 #             another one for episodic results.
-import tensorflow as tf
 import numpy as np
+import tensorflow as tf
 
 import baselines.common.tf_util as U
 

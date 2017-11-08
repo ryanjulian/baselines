@@ -1,8 +1,8 @@
-import tensorflow as tf
 import numpy as np
+import tensorflow as tf
 
-from baselines.common.mpi_running_mean_std import RunningMeanStd
 from baselines.common import tf_util as U
+from baselines.common.mpi_running_mean_std import RunningMeanStd
 
 
 class TransitionClassifier(object):

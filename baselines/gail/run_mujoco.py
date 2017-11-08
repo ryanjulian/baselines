@@ -1,18 +1,19 @@
 import argparse
 import os.path as osp
 import logging
+
 from mpi4py import MPI
 from tqdm import tqdm
-
 import numpy as np
 import gym
 
-import mlp_policy
-from baselines.common import set_global_seeds, tf_util as U
 from baselines import bench
 from baselines import logger
-from dataset.mujoco_dset import Mujoco_Dset
-from adversary import TransitionClassifier
+from baselines.common import set_global_seeds
+from baselines.common import tf_util as U
+from baselines.gail.adversary import TransitionClassifier
+from baselines.gail.dataset.mujoco_dset import Mujoco_Dset
+import baselines.gail.mlp_policy
 
 
 def get_task_name(args):
